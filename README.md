@@ -15,6 +15,8 @@ __Table of Contents__
 * [Authentication](#authentication)
   * [Web login (default)](#web-login-default)
   * [App login](#app-login)
+* [Using pytr as a library](#using-pytr-as-a-library)
+* [Error Handling and Data Safety](#error-handling-and-data-safety)
 * [Development](#development)
   * [Setting Up a Development Environment](#setting-up-a-development-environment)
   * [Linting and Code Formatting](#linting-and-code-formatting)
@@ -92,108 +94,6 @@ Options:
 ```
 <!-- end runcmd -->
 
-## Using pytr as a library
-
-Beyond the terminal interface, you can embed pytr into your own Python scripts. Below is an example
-demonstrating authentication, fetching the current portfolio, and exporting all past transactions to CSV.
-
-```python
-# 1) Authenticate (web-based login)
-from pytr import login, Portfolio, DL
-from pytr.event import Event
-from pytr.transactions import TransactionExporter
-import asyncio
-
-tr = login(phone_no='+4912345678', pin='1234', web=True)
-
-# 2) Fetch current portfolio
-pf = Portfolio(tr)
-pf.get()
-print('Positions:', pf.portfolio)
-print('Cash:', pf.cash)
-
-# 3) Download timeline events (in-memory)
-dl = DL(tr, output_path='.', filename_fmt='{iso_date}-{id}', lang='en', date_with_time=True)
-asyncio.run(dl.dl_loop())
-
-# 4) Convert raw events and export transactions
-raw_events = list(dl.tl.timeline_events.values())
-events = [Event.from_dict(e) for e in raw_events]
-exporter = TransactionExporter(lang='en', date_with_time=True)
-with open('transactions.csv', 'w') as fp:
-    exporter.export(fp, events, sort=True, format='csv')
-```
-
-### Portfolio object
-
-After fetching your portfolio, `pf.portfolio` is a list of position dicts and `pf.cash` holds cash balances:
-
-```python
-print(pf.portfolio)
-# Example output:
-[
-    {
-        "name": "Apple Inc",
-        "instrumentId": "US0378331005",
-        "netSize": "10",
-        "price": 145.32,
-        "averageBuyIn": 130.50,
-        "netValue": 1453.20,
-    },
-    {
-        "name": "Global Clean Energy USD (Dist)",
-        "instrumentId": "US37954Y8490",
-        "netSize": "5",
-        "price": 25.10,
-        "averageBuyIn": 22.45,
-        "netValue": 125.50,
-    },
-]
-
-print(pf.cash)
-# Example output:
-[
-    {"amount": "100.00", "currencyId": "EUR"}
-]
-```
-
-### Timeline events & raw data
-
-Raw timeline entries are stored in `dl.tl.timeline_events` (a mapping from ID to JSON):
-
-```python
-for eid, raw in dl.tl.timeline_events.items():
-    print(eid, raw.get("timestamp"), raw.get("eventType"))
-# Example output:
-# 9f8a7b6c-d5e4-3c2b-1a0f-9e8d7c6b5a4f 2024-01-01T12:00:00 timelineTransaction
-# 4a3b2c1d-0e9f-8a7b-6c5d-4e3f2a1b0c9e 2024-01-02T15:30:00 timeline_legacy_migrated_events
-```
-
-Convert raw payloads into `Event` objects:
-
-```python
-events = [Event.from_dict(raw) for raw in dl.tl.timeline_events.values()]
-for ev in events:
-    print(ev.date, ev.event_type, ev.value)
-# Example output:
-# 2024-01-01 12:00:00 PPEventType.BUY -145.32
-# 2024-01-02 15:30:00 PPEventType.DEPOSIT 500.00
-```
-
-### Transaction export
-
-Export a CSV of transactions using `TransactionExporter`:
-
-```python
-exporter = TransactionExporter(lang='en', date_with_time=True)
-# write CSV file
-with open('transactions.csv', 'w') as fp:
-    exporter.export(fp, events, sort=True, format='csv')
-# or get transactions directly as a list of dicts in memory:
-tx_list = exporter.to_list(events, sort=True)
-# each entry in tx_list is a dict with keys: Date, Type, Value, Note, ISIN, Shares, Fees, Taxes
-```
-
 ## Authentication
 
 There are two authentication methods:
@@ -219,35 +119,11 @@ $ pytr login --phone_no +49123456789 --pin 1234
 If no arguments are supplied pytr will look for them in the file `~/.pytr/credentials` (the first line must contain
 the phone number, the second line the pin). If the file doesn't exist pytr will ask for for the phone number and pin.
 
-## Search command
+## Using pytr as a library
 
-You can search Trade Republic’s instrument database directly from the terminal. This will return JSON payloads
-with matching instruments and their metadata.
+Beyond the terminal interface, you can embed `pytr` into your own Python scripts. The recommended way is to use the `TradeRepublic` client, which provides a modern, high-level async API.
 
-```bash
-$ pytr -v debug search "Apple"
-[
-  {
-    "assetClass": "stock",
-    "instrumentId": "US0378331005",
-    "name": "Apple Inc",
-    "exchange": "XNAS",
-    "currency": "USD",
-    "isin": "US0378331005",
-    // ... more fields
-  },
-  // more matches
-]
-```
-
-You can also refine your query with filters:
-
-```bash
-  $ pytr search --only-savable --page 2 --page-size 10 "Clean Energy"
-
-## Package-first API examples
-
-Below are sample scripts demonstrating the new high-level package‑first API.
+Below is an example demonstrating authentication, fetching portfolio, and handling potential API errors.
 
 ```python
 # client_example.py
@@ -255,32 +131,39 @@ import asyncio
 from pathlib import Path
 
 from pytr import TradeRepublic, FakeTradeRepublic
+from pytr.errors import ApiShapeError
 from pytr.models import Position, Transaction, CashBalance, Quote, Paginated
 
 # ---------- Real client usage ----------
 async def demo_real():
     client = TradeRepublic(phone='+4912345678', pin='1234')
-    auth = await client.authenticate()
-    if auth['requires_otp']:
-        code = input('Enter OTP: ')
-        await client.verify_otp(code)
+    try:
+        auth = await client.authenticate()
+        if auth['requires_otp']:
+            code = input('Enter OTP: ')
+            await client.verify_otp(code)
 
-    positions: list[Position] = await client.positions()
-    print('Positions:', positions)
+        positions: list[Position] = await client.positions()
+        print('Positions:', positions)
 
-    tx_page: Paginated[Transaction] = await client.transactions(limit=50)
-    print('Retrieved', len(tx_page.items), 'transactions')
+        tx_page: Paginated[Transaction] = await client.transactions(limit=50)
+        print('Retrieved', len(tx_page.items), 'transactions')
 
-    cash: CashBalance = await client.cash()
-    print('Cash balance:', cash)
+        cash: CashBalance = await client.cash()
+        print('Cash balance:', cash)
 
-    quotes: dict[str, Quote] = await client.quotes([p.isin for p in positions])
-    print('Quotes:', quotes)
+        quotes: dict[str, Quote] = await client.quotes([p.isin for p in positions])
+        print('Quotes:', quotes)
 
-    # streaming timeline events (first page only)
-    async for ev in client.stream.timeline():
-        print('Timeline event:', ev)
-        break
+        # streaming timeline events (first page only)
+        async for ev in client.stream.timeline():
+            print('Timeline event:', ev)
+            break
+
+    except ApiShapeError as e:
+        print("The Trade Republic API has changed in an unexpected way.")
+        print("Please report this issue on GitHub.")
+        print("Sanitized error data:", e.data)
 
 
 # ---------- Fake client usage for tests ----------
@@ -298,8 +181,20 @@ def demo_fake():
 
     quotes = asyncio.run(fake.quotes([p.isin for p in positions]))
     print('Fake quotes:', quotes)
+
+if __name__ == "__main__":
+    asyncio.run(demo_real())
 ```
-```
+
+## Error Handling and Data Safety
+
+This library interacts with an undocumented private API. This means the API can change without notice, which could cause unexpected errors. To handle this, `pytr` includes a robust mechanism to detect changes in the API response structure (known as "shape drift").
+
+When the library receives data from the API that doesn't match the expected format, it will raise an `ApiShapeError`. This exception contains a sanitized version of the received data, making it safe to log for debugging purposes without exposing sensitive information like your account number or personal details.
+
+This system, powered by the [`datason`](https://github.com/datason-org/datason) library, helps in two ways:
+1.  It immediately alerts you that the API has changed.
+2.  It provides the new data structure in a safe way, so the library can be updated.
 
 ## Development
 
@@ -347,10 +242,10 @@ checks and type checks.
 
 ### Release process
 
-1. Create a pull request that bumps the version number in `pyproject.toml`
-2. After successfully merging the PR, [create a new release](https://github.com/pytr-org/pytr/releases/new) via GitHub
-   and make use of the "Generate release notes" button. Tags are formatted as `vX.Y.Z`.
-3. The package will be published to PyPI from CI.
+1.  Create a pull request that bumps the version number in `pyproject.toml`
+2.  After successfully merging the PR, [create a new release](https://github.com/pytr-org/pytr/releases/new) via GitHub
+    and make use of the "Generate release notes" button. Tags are formatted as `vX.Y.Z`.
+3.  The package will be published to PyPI from CI.
 
 ### Keep the readme updated
 
